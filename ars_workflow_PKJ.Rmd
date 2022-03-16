@@ -1,0 +1,321 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Read and clean the metadata
+str_split- check this function for removing the rownames
+```{r}
+library(readr)
+GSE27034_metadata <- read_delim("D:/Aikawa lab/CKD_athero project/New analysis/Network based disease association/Co-expression/GSE27034_athero_metadata_geneID.txt", 
+                                     "\t", escape_double = FALSE, trim_ws = TRUE, 
+                                     skip = 29)
+
+#GSE27034_metadata = GSE27034_metadata[1:35,]
+#colnames(GSE27034_metadata) 
+GSE27034_metadata = t(GSE27034_metadata) #transpose 
+colnames(GSE27034_metadata) = GSE27034_metadata[1,]
+GSE27034_metadata = GSE27034_metadata[-1,]
+GSE27034_metadata = as.data.frame(GSE27034_metadata)
+GSE27034_metadata$pseudobatch = "right"
+```
+
+#read and clean the Athero gene expression data
+```{r}
+GSE27034_Athero_dataset <- read_delim("D:/Aikawa lab/CKD_athero project/New analysis/Network based disease association/Co-expression/GSE27034_atherodataset_geneID.txt", 
+                                           "\t", escape_double = FALSE, trim_ws = TRUE)
+#GSE27034_Athero_dataset <- GSE27034_Athero_dataset[-1,]
+#GSE27034_Athero_dataset = GSE27034_Athero_dataset[-54677,]
+rownames(GSE27034_Athero_dataset)= paste0(rownames(GSE27034_Athero_dataset),'_',GSE27034_Athero_dataset$ID_REF)
+rownames(GSE27034_Athero_dataset)[1:10]
+#GSE27034_Athero_dataset$`#NAME` = {}
+
+boxplot(GSE27034_Athero_dataset[,-1], las = 2)
+```
+```{r}
+library(WGCNA)
+sampleTree = hclust(dist(t(GSE27034_Athero_dataset[,-1])), method = "average");
+plot(sampleTree)
+```
+
+make long format for ggplot
+```{r}
+library(reshape2)
+Athero_long = melt(GSE27034_Athero_dataset[,-1])
+names(Athero_long)[1] = "Sample_ID"  #change ID_REF to Sample_ID
+#class = GSE27034_Athero_dataset[1,-1]
+#class = t(class)
+names(GSE27034_metadata)[35] = "Sample_ID"
+
+GSE27034_metadata$disease = "Control"
+#GSE27034_metadata$disease[which(GSE27034_metadata$Sample_ID %in% rownames(class)[which(class[,1]==2)])] = "Athero"
+
+GSE27034_metadata$disease[grep("PAD",GSE27034_metadata$`!Sample_source_name_ch1`)] = "Athero"
+
+#
+
+Athero_long1 = merge(Athero_long,(GSE27034_metadata))
+
+#library(ggplot2)
+ggplot(Athero_long1, aes(x=Sample_ID, y=(value), fill = disease)) + 
+  geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylim(c(-2,2))
+```
+Lets calculate and plot PCA 
+
+```{r}
+#GSE27034_Athero_dataset = GSE27034_Athero_dataset[-c(54675),]
+pc = prcomp(GSE27034_Athero_dataset[,-c(1)],center = TRUE,scale. = TRUE)
+
+library(ggrepel)
+p <- ggplot(as.data.frame(pc$rotation), aes(PC1, PC2, label = rownames(pc$rotation))) +
+  geom_point(color = "red")
+p <- p + geom_text_repel(max.overlaps = 20) + labs(title = "geom_text_repel()")
+p
+```
+Alternative view of PCA
+
+```{r}
+library("FactoMineR")
+library("factoextra")
+library(corrplot)
+
+res.pca <- PCA(GSE27034_Athero_dataset[,-c(1)], graph = FALSE)
+print(res.pca)
+fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 100))
+fviz_pca_var(res.pca, col.var = "black")
+
+fviz_pca_var(res.pca, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+)
+```
+We can find the IDs of two groups in PCA plot and make a new variable called as pseudobatch
+```{r}
+GSE27034_metadata$pseudobatch = "right"
+GSE27034_metadata$pseudobatch[which(GSE27034_metadata$Sample_ID %in% names(which(pc$rotation[,1]<0)))] = "left"
+Athero_long1 = merge(Athero_long,(GSE27034_metadata))
+
+ggplot(Athero_long1, aes(x=Sample_ID, y=(value), fill = pseudobatch)) + 
+  geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylim(c(-2,2))
+```
+Now we use limma for correcting the pseudobatch effect before we run differential expression. 
+Actually there are two ways, first is to use CoMBat function from SVA to remove the batch effect before using limma for DE. Second is treating the batch as covariate and using it in Limma WHILE computing DE. We will try both of these. There is no best way. I prefer ComBat to get to a cleaner data before I do DE.
+
+
+
+Case 1: Using Combat
+```{r}
+library(limma)
+
+pseudobatch = GSE27034_metadata$pseudobatch
+class = GSE27034_Athero_dataset[1,]
+exprs2 = GSE27034_Athero_dataset[-1,-c(1)]
+modcom = model.matrix(~1, data = as.factor(pseudobatch))
+library(sva)
+GSE27034_Athero_batch = ComBat(dat=exprs2, batch=pseudobatch, mod=modcom, par.prior=TRUE, prior.plots=FALSE)
+head(GSE27034_Athero_batch)
+rownames(GSE27034_Athero_batch) = GSE27034_Athero_dataset$`#NAME`[-1] #remove class row
+GSE27034_Athero_batch = as.matrix(GSE27034_Athero_batch)
+```
+
+Lets recompute PCA and check whats happened with this ComBat
+```{r}
+pcbatch = prcomp(GSE27034_Athero_batch,center = TRUE,scale. = TRUE)
+p1 <- ggplot(as.data.frame(pcbatch$rotation), aes(PC1, PC2, label = rownames(pcbatch$rotation))) +
+  geom_point(color = "red")
+p1 <- p1 + geom_text_repel(max.overlaps = 20) + labs(title = "geom_text_repel()")
+p1
+```
+We can see that we have managed to remove the variability.
+
+```{r}
+Athero_lb = melt(GSE27034_Athero_batch)
+names(Athero_lb)[2] = "Sample_ID"
+Athero_long2 = merge(Athero_lb,(GSE27034_metadata))
+
+ggplot(Athero_long2, aes(x=Sample_ID, y=(value), fill = pseudobatch)) + 
+  geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylim(c(-2,2))
+```
+
+```{r}
+disease = GSE27034_metadata$disease
+
+plot(pcbatch$rotation[,1],pcbatch$rotation[,2], pch = c(15,19)[as.numeric(class)], col = as.factor(pseudobatch))
+```
+Now lets do DE analysis using LIMMA
+
+
+```{r}
+#Limma
+#disease is in previous chunk
+counts  = GSE27034_Athero_batch 
+design <- model.matrix(~ disease)
+
+vfit <- lmFit(counts, design)
+efit <- eBayes(vfit)
+topTable(efit)
+```
+What happens here is a common limma (and friends) workflow. First, the comparison of interest (and the design of the experiment) is defined through a so-called “design matrix”. This matrix basically encompasses everything we know about the design; in this case there are two groups (we have more to say on the design below). Next, the model is fitted. This is followed by borrowing strength across genes using a so-called empirical Bayes procedure (this is the step in limma which really works wonders). Because this design only has two groups there is only one possible comparison to make: which genes differs between the two groups. This question is examined by the topTable() function which lists the top differentially expressed genes. In a more complicated design, the topTable() function would need to be told which comparison of interest to summarize. (from internet: https://kasperdanielhansen.github.io/genbioconductor/html/limma.html)
+
+```{r}
+colnames(efit$coefficients)
+summary(decideTests(efit))
+```
+
+gene highly DE (increased expression) in Athero are in Intercept. 
+```{r}
+tfit <- treat(efit,lfc = 1)
+dt <- decideTests(tfit)
+summary(dt)
+```
+
+
+```{r}
+volcanoplot(efit, coef=1, col = "red",highlight = 10)
+```
+
+
+```{r}
+plotMD(tfit, column=, status=dt[,1], main=colnames(efit)[1])
+```
+Case 2: Using pseudobatch variable as a covariate in the original gene expression matrix and use that variable in creating design (like we usually do for sex and race , etc)
+
+```{r}
+##Using limma DE and no batch correction
+design <- model.matrix(~1+ pseudobatch + disease)
+exprs2 = GSE27034_Athero_dataset[-1,-c(1)]
+counts = exprs2 #
+vfit <- lmFit(counts, design)
+efit <- eBayes(vfit)
+#topTable(efit)
+colnames(efit$coefficients)
+summary(decideTests(efit))
+```
+
+
+```{r}
+tfit <- treat(efit,lfc = .5)
+dt <- decideTests(tfit)
+summary(dt)
+```
+```{r}
+plotMA(efit)#, coef =3, status=dt[,1], main=colnames(efit)[1])
+```
+
+
+```{r}
+volcanoplot(efit, coef=1, col = "red",highlight = 10)
+```
+
+
+##PART 2: Coexpression Network Analysis. 
+
+
+###We can directly load the saved batch corrected dataframe for the following analysis. you can clear the out and start fresh from here. Everything need is there in the file loaded below. 
+```{r}
+#save(GSE27034_Athero_batch,disease,GSE27034_metadata, file = "~/Mass General Brigham/Kumar Jha, Prabhash - Network based disease association/ARS_analysis/GSE27034_Athero_batch.rds")
+load(file = "~/Mass General Brigham/Kumar Jha, Prabhash - Network based disease association/ARS_analysis/GSE27034_Athero_batch.rds")
+
+```
+
+filtering and cleaning
+```{r}
+gsg = goodSamplesGenes(GSE27034_Athero_batch, verbose = 3);
+gsg$allOK #ALl good.
+
+sampleTree = hclust(dist(t(GSE27034_Athero_batch)), method = "average");
+plot(sampleTree)
+```
+```{r}
+clust = cutreeStatic(sampleTree, cutHeight = 15, minSize = 10)
+table(clust)
+keepSamples = (clust==0)
+GSE27034_Athero_batch = GSE27034_Athero_batch[,keepSamples]
+GSE27034_Athero_batch = t(GSE27034_Athero_batch)
+nGenes = ncol(GSE27034_Athero_batch)
+nSamples = nrow(GSE27034_Athero_batch)
+```
+The variable GSE27034_Athero_batch now contains the expression data ready for network analysis.
+Lets make metadata in format for WGCNA
+```{r}
+names(GSE27034_metadata)
+GSE27034_metadata = GSE27034_metadata[,c(1,36,8)]
+names(GSE27034_metadata)
+# Form a data frame analogous to expression data that will hold the clinical traits.
+sample = rownames(GSE27034_Athero_batch);
+traitRows = match(sample, GSE27034_metadata$`!Sample_geo_accession`);
+datTraits = GSE27034_metadata[traitRows, -1];
+GSE27034_metadata$name = rownames(GSE27034_metadata)
+rownames(GSE27034_metadata) = GSE27034_metadata$`!Sample_geo_accession`;
+GSE27034_metadata$`!Sample_geo_accession` = {}
+as.numeric(as.factor(datTraits$pseudobatch))
+datTraits$pseudobatch = as.factor(datTraits$pseudobatch)
+datTraits$name = rownames(datTraits)
+datTraits$name = as.factor(datTraits$name)
+datTraits$disease = stringr::str_split_fixed(datTraits$name,'_',4)[,3]
+datTraits$disease = as.factor(datTraits$disease)
+collectGarbage();
+# Re-cluster samples
+sampleTree2 = hclust(dist(GSE27034_Athero_batch), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(c(datTraits$pseudobatch), signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                  groupLabels = names(datTraits)[1],
+                  main = "Sample dendrogram and trait heatmap")
+```
+```{r}
+traitColors = numbers2colors(c(datTraits$disease), signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                  groupLabels = names(datTraits)[4],
+                  main = "Sample dendrogram and trait heatmap")
+```
+We threshold the data to remove genes with mean expression between -0.05 to 0.05. Not sure right thigng to do but my computer cannot handle 54k x 54k matrix so I reducing its size. 
+```{r}
+apply(GSE27034_Athero_batch,2,mean) -> genemean
+ind  = names(genemean[which(genemean > .05 | genemean < -0.05)]) #we red
+GSE27034_Athero_batch_mini = GSE27034_Athero_batch[,ind]
+
+```
+
+```{r}
+GSE27034_batch_Athero = GSE27034_Athero_batch_mini[disease=="Athero",]
+##For computing Pearson correlation.
+library(WGCNA)
+Pearson_Athero = WGCNA::cor(GSE27034_batch_Athero, method = 'pearson')
+diag(Pearson_Athero) = 0 #remove self-correlation
+Pearson_Athero[abs(Pearson_Athero) < 0.5] <- 0
+
+#library(Matrix)
+#Pearson_Athero_sp <- Matrix(Pearson_Athero, sparse = TRUE)  # compressed sparse column CSC
+
+```
+
+```{r}
+GSE27034_batch_Control = GSE27034_Athero_batch_mini[disease=="Control",]
+##For computing Pearson correlation.
+library(WGCNA)
+Pearson_Control = WGCNA::cor(GSE27034_batch_Control, method = 'pearson')
+diag(Pearson_Control) = 0 #remove self-correlation
+Pearson_Control[abs(Pearson_Control) < 0.5] <- 0
+
+```
+COnvert matrix (NxN) to (Nx3) format. first two columns are genes and third is correlation between them for Control and fourth is for Athero network.
+```{r}
+library(reshape)
+Pearson_long = melt(Pearson_Control)
+names(Pearson_long)[3] = "Control"
+
+temp = melt(Pearson_Athero)
+names(temp)[3] = "Athero"
+
+Pearson_long = cbind(Pearson_long,temp[,3])
+names(Pearson_long)[4] = "Athero"
+```
+
+Here we filter out edges that are zero (<0.5) in both networks.
+```{r}
+Pearson_long1 = Pearson_long[idz,]
+```
+
